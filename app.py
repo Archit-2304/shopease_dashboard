@@ -1,47 +1,38 @@
-"""
-FOUNDATIONS OF BIG DATA ANALYTICS WITH PYTHON (FBDA)
-Dynamic Analytical Dashboard with Python - FORE School of Management
-
-Group: GR6 | Roll suffixes: 066_100_102
-Fixed randomization seed: 066100102
-Required analytical sample: 2,500 random records
-
-Run locally / in Colab/Streamlit:
-    streamlit run app.py
-
-The application intentionally uses the libraries specified in the FBDA project brief:
-Pandas, NumPy, Random, Matplotlib, Seaborn, SciPy, Statsmodels and Streamlit.
-"""
+# Foundations of Big Data Analytics with Python (FBDA)
+# FORE School of Management | PGDM-BDA
+# Project: Dynamic Analytical Dashboard with Python
+#
+# Designed for the supplied ShopEase orders sample.
+# The application uses Pandas, NumPy, Random, Matplotlib, Seaborn,
+# SciPy, Statsmodels and Streamlit, as specified in the project brief.
+#
+# Run locally:
+#   pip install streamlit pandas numpy matplotlib seaborn scipy statsmodels
+#   streamlit run fbda_dashboard.py
+#
+# The app expects cleaned_orders.csv in the same folder by default.
+# A CSV uploader is also provided so the app can be run on another machine.
 
 from __future__ import annotations
 
 import io
 import os
 import random
-import warnings
-from typing import Optional, List, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 import pandas as pd
-import streamlit as st
-
 import matplotlib.pyplot as plt
 import seaborn as sns
-
+import streamlit as st
 from scipy import stats
 import statsmodels.api as sm
-from statsmodels.stats.proportion import proportion_confint
+import statsmodels.formula.api as smf
 
-warnings.filterwarnings("ignore")
 
 # -----------------------------------------------------------------------------
-# PROJECT CONSTANTS - based on the supplied FBDA project brief + notebook name
+# PAGE CONFIGURATION
 # -----------------------------------------------------------------------------
-GROUP_ID = "066_100_102"
-RANDOM_SEED = 66100102
-SAMPLE_SIZE = 2500
-DATASET_HINT = "shopease_raw_orders (1).csv"
-
 st.set_page_config(
     page_title="ShopEase | FBDA Analytical Dashboard",
     page_icon="📊",
@@ -49,794 +40,848 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# -----------------------------------------------------------------------------
-# STYLING
-# -----------------------------------------------------------------------------
-st.markdown(
-    """
-    <style>
-        .main { padding-top: 1rem; }
-        .block-container { max-width: 1450px; padding-top: 1.2rem; }
-        .metric-card {
-            padding: 0.75rem 1rem;
-            border-radius: 0.75rem;
-            border: 1px solid rgba(128,128,128,.25);
-            background: rgba(128,128,128,.06);
-        }
-        .small-note { font-size: 0.85rem; opacity: .75; }
-        h1, h2, h3 { letter-spacing: -0.02em; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+sns.set_theme(style="whitegrid")
 
 # -----------------------------------------------------------------------------
-# HELPERS
+# CONSTANTS / PROJECT METADATA
 # -----------------------------------------------------------------------------
-def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
-    """Standardise column labels without changing the underlying meaning."""
-    out = df.copy()
-    out.columns = (
-        out.columns.astype(str)
-        .str.strip()
-        .str.replace(r"\s+", " ", regex=True)
-    )
-    return out
+PROJECT_TITLE = "Dynamic Analytical Dashboard with Python"
+COURSE = "Foundations of Big Data Analytics with Python (FBDA)"
+EXPECTED_SAMPLE_SIZE = 2500
+PROJECT_SEED = 66100102  # 066_100_102 with underscores removed
+DEFAULT_FILE = "cleaned_orders.csv"
 
-
-def load_csv_from_bytes(file_bytes: bytes) -> pd.DataFrame:
-    """Read a CSV robustly from uploaded bytes."""
-    errors = []
-    for encoding in ["utf-8", "utf-8-sig", "cp1252", "latin1"]:
-        try:
-            return clean_column_names(pd.read_csv(io.BytesIO(file_bytes), encoding=encoding))
-        except Exception as exc:
-            errors.append(f"{encoding}: {exc}")
-    raise ValueError("Could not read the CSV file. Attempts: " + " | ".join(errors))
-
-
-def infer_date_columns(df: pd.DataFrame) -> List[str]:
-    candidates = []
-    for c in df.columns:
-        name = c.lower()
-        if any(k in name for k in ["date", "time", "timestamp", "created", "ordered", "ship"]):
-            parsed = pd.to_datetime(df[c], errors="coerce")
-            if parsed.notna().mean() >= 0.60:
-                candidates.append(c)
-    return candidates
-
-
-def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    out = clean_column_names(df)
-    # Convert obvious date/time columns where conversion is reliable.
-    for c in infer_date_columns(out):
-        converted = pd.to_datetime(out[c], errors="coerce")
-        if converted.notna().mean() >= 0.60:
-            out[c] = converted
-    return out
-
-
-def numeric_columns(df: pd.DataFrame) -> List[str]:
-    return df.select_dtypes(include=np.number).columns.tolist()
-
-
-def categorical_columns(df: pd.DataFrame) -> List[str]:
-    return df.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
-
-
-def datetime_columns(df: pd.DataFrame) -> List[str]:
-    return df.select_dtypes(include=["datetime", "datetimetz"]).columns.tolist()
-
-
-def safe_numeric(df: pd.DataFrame, col: str) -> pd.Series:
-    return pd.to_numeric(df[col], errors="coerce").dropna()
-
-
-def safe_name_match(columns: List[str], keywords: List[str]) -> Optional[str]:
-    for c in columns:
-        lc = c.lower().replace("_", " ")
-        if any(k in lc for k in keywords):
-            return c
-    return None
-
-
-def guess_sales_column(df: pd.DataFrame) -> Optional[str]:
-    return safe_name_match(
-        numeric_columns(df),
-        ["sales", "revenue", "amount", "order value", "order_value", "gmv", "total"]
-    )
-
-
-def guess_quantity_column(df: pd.DataFrame) -> Optional[str]:
-    return safe_name_match(numeric_columns(df), ["quantity", "qty", "units", "items"])
-
-
-def guess_discount_column(df: pd.DataFrame) -> Optional[str]:
-    return safe_name_match(numeric_columns(df), ["discount", "markdown", "rebate"])
-
-
-def guess_profit_column(df: pd.DataFrame) -> Optional[str]:
-    return safe_name_match(numeric_columns(df), ["profit", "margin", "contribution"])
-
-
-def format_number(x, decimals=2):
-    if pd.isna(x):
-        return "—"
-    if abs(float(x)) >= 1_000_000:
-        return f"{float(x)/1_000_000:.{decimals}f}M"
-    if abs(float(x)) >= 1_000:
-        return f"{float(x)/1_000:.{decimals}f}K"
-    return f"{float(x):,.{decimals}f}"
-
-
-def confidence_interval_mean(series: pd.Series, confidence: float = 0.95):
-    x = pd.to_numeric(series, errors="coerce").dropna()
-    n = len(x)
-    if n < 2:
-        return np.nan, np.nan, np.nan
-    mean = x.mean()
-    se = stats.sem(x)
-    lo, hi = stats.t.interval(confidence, df=n - 1, loc=mean, scale=se)
-    return mean, lo, hi
-
-
-def p_value_text(p):
-    if pd.isna(p):
-        return "—"
-    return f"{p:.6f}"
-
-
-def significance_text(p, alpha=0.05):
-    if pd.isna(p):
-        return "Not available"
-    return "Statistically significant at α = 0.05" if p < alpha else "Not statistically significant at α = 0.05"
-
-
-def detect_binary(series: pd.Series) -> Tuple[bool, Optional[pd.Series]]:
-    s = series.dropna()
-    unique = list(pd.unique(s))
-    if len(unique) != 2:
-        return False, None
-    return True, s
-
-
-def make_download_csv(df: pd.DataFrame) -> bytes:
-    return df.to_csv(index=False).encode("utf-8")
-
-
-# -----------------------------------------------------------------------------
-# LOAD DATA
-# -----------------------------------------------------------------------------
-@st.cache_data(show_spinner=False)
-def cached_read_file(file_bytes: bytes) -> pd.DataFrame:
-    return prepare_dataframe(load_csv_from_bytes(file_bytes))
-
-
-st.sidebar.title("⚙️ Dashboard Controls")
-st.sidebar.caption("FBDA • FORE School of Management")
-
-uploaded_file = st.sidebar.file_uploader(
-    "Upload the ShopEase CSV dataset",
-    type=["csv"],
-    help=f"Expected dataset based on the supplied notebook: {DATASET_HINT}",
-)
-
-# Try the expected local file if it exists; otherwise require upload.
-default_candidates = [
-    DATASET_HINT,
-    "shopease_raw_orders.csv",
-    os.path.join("data", DATASET_HINT),
-    os.path.join("data", "shopease_raw_orders.csv"),
+REQUIRED_COLUMNS = [
+    "OrderID", "CustomerID", "OrderDate", "CustomerAge", "Gender", "City",
+    "Category", "Product", "Quantity", "UnitPrice", "Discount",
+    "PaymentMethod", "OrderStatus", "DeliveryDate", "Rating", "TotalAmount",
+    "DiscountRate", "CalculatedAmount", "AmountMismatch", "InvalidRow",
+    "Revenue", "OrderMonth",
 ]
 
-raw_df = None
-source_label = None
+NUMERIC_COLUMNS = [
+    "CustomerAge", "Quantity", "UnitPrice", "Rating", "TotalAmount",
+    "DiscountRate", "CalculatedAmount", "Revenue",
+]
 
-if uploaded_file is not None:
-    try:
-        raw_df = cached_read_file(uploaded_file.getvalue())
-        source_label = f"Uploaded: {uploaded_file.name}"
-    except Exception as exc:
-        st.error(f"Could not load the uploaded dataset: {exc}")
-        st.stop()
-else:
-    for candidate in default_candidates:
-        if os.path.exists(candidate):
-            try:
-                with open(candidate, "rb") as f:
-                    raw_df = cached_read_file(f.read())
-                source_label = f"Local file: {candidate}"
-                break
-            except Exception:
-                pass
+CATEGORICAL_COLUMNS = [
+    "Gender", "City", "Category", "Product", "PaymentMethod", "OrderStatus",
+]
 
-if raw_df is None:
-    st.title("📊 ShopEase — Dynamic Analytical Dashboard")
-    st.info(
-        "Upload the CSV dataset from the left sidebar to start. "
-        "The application will then create the required reproducible 2,500-record analytical sample "
-        f"using random seed {RANDOM_SEED:,}."
+# -----------------------------------------------------------------------------
+# HELPER FUNCTIONS
+# -----------------------------------------------------------------------------
+
+def money(x: float) -> str:
+    if pd.isna(x):
+        return "N/A"
+    if abs(x) >= 10_000_000:
+        return f"₹{x/10_000_000:.2f} Cr"
+    if abs(x) >= 100_000:
+        return f"₹{x/100_000:.2f} L"
+    return f"₹{x:,.0f}"
+
+
+def pct(x: float) -> str:
+    return "N/A" if pd.isna(x) else f"{x:.1f}%"
+
+
+def safe_div(a: float, b: float) -> float:
+    return np.nan if b == 0 else a / b
+
+
+def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out.columns = [str(c).strip() for c in out.columns]
+    return out
+
+
+def normalise_discount(series: pd.Series) -> pd.Series:
+    """Convert mixed discount representations such as 0.10 and 10% to decimal."""
+    s = series.astype("string").str.strip()
+    result = pd.to_numeric(s.str.rstrip("%"), errors="coerce")
+    percent_mask = s.str.endswith("%", na=False)
+    result.loc[percent_mask] = result.loc[percent_mask] / 100
+    # Values greater than 1 are interpreted as percentages.
+    result.loc[(result > 1) & result.notna()] = result.loc[(result > 1) & result.notna()] / 100
+    return result.astype(float)
+
+
+def prepare_data(raw: pd.DataFrame) -> pd.DataFrame:
+    """Standardise dates, discount, numeric columns and create safe analytical fields."""
+    df = clean_column_names(raw)
+
+    missing_required = [c for c in REQUIRED_COLUMNS if c not in df.columns]
+    if missing_required:
+        raise ValueError(
+            "The uploaded CSV is missing required columns: " + ", ".join(missing_required)
+        )
+
+    # Preserve the supplied fields but make them analytically consistent.
+    df["OrderDate"] = pd.to_datetime(df["OrderDate"], errors="coerce")
+    df["DeliveryDate"] = pd.to_datetime(df["DeliveryDate"], errors="coerce")
+    df["OrderMonth"] = pd.to_datetime(df["OrderMonth"], errors="coerce")
+
+    for c in [c for c in NUMERIC_COLUMNS if c != "DiscountRate"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    df["DiscountRate"] = normalise_discount(df["Discount"])
+
+    # Recalculate amount from core commercial fields for validation.
+    df["RecomputedAmount"] = (
+        df["Quantity"] * df["UnitPrice"] * (1 - df["DiscountRate"])
     )
-    st.markdown(
-        "### Project configuration\n"
-        f"- **Group ID:** `{GROUP_ID}`\n"
-        f"- **Random seed / random_state:** `{RANDOM_SEED}`\n"
-        f"- **Required analytical sample:** `{SAMPLE_SIZE:,}` records\n"
-        "- **Dataset expected from the supplied Colab notebook:** ShopEase raw orders CSV"
+    df["CalculatedMismatchCheck"] = ~np.isclose(
+        df["TotalAmount"], df["RecomputedAmount"], rtol=1e-8, atol=1e-8, equal_nan=False
     )
-    st.stop()
 
-# -----------------------------------------------------------------------------
-# FIXED RANDOM SAMPLE - PROJECT REQUIREMENT
-# -----------------------------------------------------------------------------
-if len(raw_df) < SAMPLE_SIZE:
-    st.error(
-        f"The uploaded dataset contains only {len(raw_df):,} records, but the FBDA brief requires "
-        f"a random sample of {SAMPLE_SIZE:,} records. Please verify that you uploaded the complete dataset."
+    # Delivery duration is meaningful only when both dates exist.
+    df["DeliveryDays"] = (
+        (df["DeliveryDate"] - df["OrderDate"]).dt.total_seconds() / 86400
     )
-    st.stop()
 
-# Use both random.seed and random_state exactly as required by the project brief.
-random.seed(RANDOM_SEED)
-np.random.seed(RANDOM_SEED)
+    # Revenue is retained from the supplied dataset. For robustness, if it is
+    # absent or completely unusable, fall back to TotalAmount for delivered
+    # orders only. The supplied dataset contains Revenue, so this normally does
+    # not alter the project data.
+    if "Revenue" not in df or df["Revenue"].isna().all():
+        df["Revenue"] = np.where(df["OrderStatus"].eq("Delivered"), df["TotalAmount"], 0.0)
 
-sample_df = raw_df.sample(n=SAMPLE_SIZE, random_state=RANDOM_SEED).reset_index(drop=True)
+    # Helpful derived dimensions.
+    df["OrderYear"] = df["OrderDate"].dt.year
+    df["OrderMonthName"] = df["OrderDate"].dt.strftime("%b")
+    df["OrderWeekday"] = df["OrderDate"].dt.day_name()
+    df["IsDelivered"] = df["OrderStatus"].eq("Delivered")
+    df["IsCancelled"] = df["OrderStatus"].eq("Cancelled")
+    df["IsPending"] = df["OrderStatus"].eq("Pending")
+    df["HasRating"] = df["Rating"].notna()
+    df["CustomerAgeBand"] = pd.cut(
+        df["CustomerAge"],
+        bins=[17, 25, 35, 45, 55, 65, 100],
+        labels=["18–25", "26–35", "36–45", "46–55", "56–65", "66+"],
+        include_lowest=True,
+    )
 
-# -----------------------------------------------------------------------------
-# SESSION-LEVEL DATA SUMMARY
-# -----------------------------------------------------------------------------
-num_cols = numeric_columns(sample_df)
-cat_cols = categorical_columns(sample_df)
-date_cols = datetime_columns(sample_df)
+    return df
 
-sales_col = guess_sales_column(sample_df)
-quantity_col = guess_quantity_column(sample_df)
-discount_col = guess_discount_column(sample_df)
-profit_col = guess_profit_column(sample_df)
 
-# Sidebar page navigation
-page = st.sidebar.radio(
-    "Navigate",
-    [
-        "🏠 Executive Overview",
-        "🔎 Data Quality & Dictionary",
-        "📈 Descriptive Analytics",
-        "📊 Categorical Analytics",
-        "🔗 Correlation & Visuals",
-        "🧪 Inferential Statistics",
-        "📐 Regression Analysis",
-        "📥 Sample Data",
-    ],
-)
+@st.cache_data(show_spinner=False)
+def load_csv_bytes(file_bytes: bytes) -> pd.DataFrame:
+    raw = pd.read_csv(io.BytesIO(file_bytes))
+    return prepare_data(raw)
 
-st.sidebar.divider()
-st.sidebar.caption(f"Source: {source_label}")
-st.sidebar.caption(f"Original records: {len(raw_df):,}")
-st.sidebar.caption(f"Analytical sample: {len(sample_df):,}")
-st.sidebar.caption(f"Fixed random_state: {RANDOM_SEED:,}")
+
+@st.cache_data(show_spinner=False)
+def load_default_file(path: str) -> pd.DataFrame:
+    raw = pd.read_csv(path)
+    return prepare_data(raw)
+
+
+def get_filtered_data(df: pd.DataFrame, filters: dict) -> pd.DataFrame:
+    out = df.copy()
+    if filters["cities"]:
+        out = out[out["City"].isin(filters["cities"])]
+    if filters["categories"]:
+        out = out[out["Category"].isin(filters["categories"])]
+    if filters["statuses"]:
+        out = out[out["OrderStatus"].isin(filters["statuses"])]
+    if filters["genders"]:
+        out = out[out["Gender"].isin(filters["genders"])]
+    if filters["payments"]:
+        out = out[out["PaymentMethod"].isin(filters["payments"])]
+    if filters["products"]:
+        out = out[out["Product"].isin(filters["products"])]
+    if filters["date_range"]:
+        if isinstance(filters["date_range"], (tuple, list)) and len(filters["date_range"]) == 2:
+            start, end = filters["date_range"]
+        else:
+            start = end = filters["date_range"]
+        out = out[(out["OrderDate"].dt.date >= start) & (out["OrderDate"].dt.date <= end)]
+    return out
+
+
+def confidence_interval_mean(series: pd.Series, confidence: float = 0.95) -> Tuple[float, float]:
+    x = pd.to_numeric(series, errors="coerce").dropna().to_numpy()
+    n = len(x)
+    if n < 2:
+        return np.nan, np.nan
+    mean = np.mean(x)
+    se = stats.sem(x)
+    margin = stats.t.ppf((1 + confidence) / 2, n - 1) * se
+    return mean - margin, mean + margin
+
+
+def make_summary_table(df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for c in NUMERIC_COLUMNS:
+        s = pd.to_numeric(df[c], errors="coerce").dropna()
+        if len(s) == 0:
+            continue
+        rows.append({
+            "Variable": c,
+            "Count": int(s.count()),
+            "Minimum": s.min(),
+            "25th Percentile": s.quantile(.25),
+            "Median": s.median(),
+            "Mean": s.mean(),
+            "75th Percentile": s.quantile(.75),
+            "Maximum": s.max(),
+            "Range": s.max() - s.min(),
+            "Std. Deviation": s.std(ddof=1),
+            "Skewness": s.skew(),
+            "Kurtosis": s.kurt(),
+        })
+    return pd.DataFrame(rows)
+
+
+def category_summary(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    s = df[col].astype("string").fillna("Missing")
+    out = s.value_counts(dropna=False).rename_axis("Category").reset_index(name="Frequency")
+    out["Relative Frequency"] = out["Frequency"] / len(df) if len(df) else np.nan
+    out["Relative Frequency"] = out["Relative Frequency"].map(lambda x: f"{x:.2%}" if pd.notna(x) else "N/A")
+    return out
+
+
+def plot_empty(message: str) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(8, 3.5))
+    ax.text(0.5, 0.5, message, ha="center", va="center", fontsize=12)
+    ax.axis("off")
+    return fig
+
 
 # -----------------------------------------------------------------------------
 # HEADER
 # -----------------------------------------------------------------------------
 st.title("📊 ShopEase — Dynamic Analytical Dashboard")
 st.caption(
-    "Foundations of Big Data Analytics with Python (FBDA) • FORE School of Management • "
-    f"Group {GROUP_ID}"
+    f"{COURSE}  |  {PROJECT_TITLE}  |  Fixed project randomization seed: {PROJECT_SEED:,}"
 )
 
 # -----------------------------------------------------------------------------
-# PAGE 1: EXECUTIVE OVERVIEW
+# DATA SOURCE / SIDEBAR
 # -----------------------------------------------------------------------------
-if page == "🏠 Executive Overview":
-    st.subheader("Executive Overview")
-    st.write(
-        "This dashboard analyses the fixed 2,500-record random sample required by the FBDA project brief. "
-        "The sample is reproducible using the group's prescribed randomization seed."
+with st.sidebar:
+    st.header("⚙️ Dashboard Controls")
+    st.markdown("**Data source**")
+
+    uploaded_file = st.file_uploader(
+        "Upload CSV (optional)",
+        type=["csv"],
+        help="Upload cleaned_orders.csv or another CSV with the required project columns.",
     )
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("Sample Records", f"{len(sample_df):,}")
-    c2.metric("Variables", f"{sample_df.shape[1]:,}")
-    c3.metric("Numeric Variables", f"{len(num_cols):,}")
-    c4.metric("Categorical Variables", f"{len(cat_cols):,}")
-    c5.metric("Missing Cells", f"{int(sample_df.isna().sum().sum()):,}")
+    st.divider()
+    st.subheader("Filters")
 
-    if sales_col:
-        st.divider()
-        st.subheader(f"Primary Business Metric: {sales_col}")
-        sales = safe_numeric(sample_df, sales_col)
-        a, b, c, d = st.columns(4)
-        a.metric("Total", format_number(sales.sum()))
-        b.metric("Mean", format_number(sales.mean()))
-        c.metric("Median", format_number(sales.median()))
-        d.metric("Std. Deviation", format_number(sales.std()))
-
-        fig, ax = plt.subplots(figsize=(10, 4.5))
-        sns.histplot(sales, kde=True, ax=ax)
-        ax.set_title(f"Distribution of {sales_col}")
-        ax.set_xlabel(sales_col)
-        ax.set_ylabel("Frequency")
-        st.pyplot(fig, clear_figure=True, use_container_width=True)
-
-    st.subheader("Automatically detected analytical fields")
-    detected = pd.DataFrame(
-        {
-            "Analytical Role": ["Sales / Revenue", "Quantity", "Discount", "Profit / Margin"],
-            "Detected Variable": [sales_col or "Not detected", quantity_col or "Not detected", discount_col or "Not detected", profit_col or "Not detected"],
-        }
-    )
-    st.dataframe(detected, use_container_width=True, hide_index=True)
-
-    st.info(
-        "Variable detection is only a convenience for the dashboard. All analytical conclusions should be based on the actual variable definitions and data-quality checks shown in the report."
-    )
-
-# -----------------------------------------------------------------------------
-# PAGE 2: DATA QUALITY & DICTIONARY
-# -----------------------------------------------------------------------------
-elif page == "🔎 Data Quality & Dictionary":
-    st.subheader("Data Quality & Variable Dictionary")
-
-    q1, q2, q3, q4 = st.columns(4)
-    q1.metric("Original Rows", f"{len(raw_df):,}")
-    q2.metric("Sample Rows", f"{len(sample_df):,}")
-    q3.metric("Columns", f"{sample_df.shape[1]:,}")
-    q4.metric("Duplicate Rows", f"{int(sample_df.duplicated().sum()):,}")
-
-    st.markdown("### Missing Data")
-    missing = pd.DataFrame({
-        "Variable": sample_df.columns,
-        "Missing Count": sample_df.isna().sum().values,
-        "Missing %": (sample_df.isna().mean().values * 100),
-        "Data Type": sample_df.dtypes.astype(str).values,
-        "Unique Values": sample_df.nunique(dropna=True).values,
-    }).sort_values("Missing Count", ascending=False)
-    st.dataframe(missing, use_container_width=True, hide_index=True)
-
-    st.markdown("### Variable Dictionary")
-    dictionary = pd.DataFrame({
-        "Variable": sample_df.columns,
-        "Python Data Type": [str(sample_df[c].dtype) for c in sample_df.columns],
-        "Classification": [
-            "Non-Categorical" if pd.api.types.is_numeric_dtype(sample_df[c]) else ("Date/Time" if pd.api.types.is_datetime64_any_dtype(sample_df[c]) else "Categorical")
-            for c in sample_df.columns
-        ],
-        "Unique Values": [sample_df[c].nunique(dropna=True) for c in sample_df.columns],
-        "Missing Values": [sample_df[c].isna().sum() for c in sample_df.columns],
-        "Example Value": [sample_df[c].dropna().iloc[0] if sample_df[c].notna().any() else "—" for c in sample_df.columns],
-    })
-    st.dataframe(dictionary, use_container_width=True, hide_index=True)
-
-    st.markdown("### Numerical Summary")
-    if num_cols:
-        st.dataframe(sample_df[num_cols].describe().T, use_container_width=True)
+# Load data
+try:
+    if uploaded_file is not None:
+        df = load_csv_bytes(uploaded_file.getvalue())
+        source_label = uploaded_file.name
+    elif os.path.exists(DEFAULT_FILE):
+        df = load_default_file(DEFAULT_FILE)
+        source_label = DEFAULT_FILE
     else:
-        st.warning("No numeric variables were detected.")
-
-# -----------------------------------------------------------------------------
-# PAGE 3: DESCRIPTIVE ANALYTICS
-# -----------------------------------------------------------------------------
-elif page == "📈 Descriptive Analytics":
-    st.subheader("Descriptive Statistics — Non-Categorical Data")
-
-    if not num_cols:
-        st.warning("No numeric variables were detected in the sample.")
-    else:
-        selected = st.selectbox("Select numerical variable", num_cols)
-        x = safe_numeric(sample_df, selected)
-
-        mean, ci_lo, ci_hi = confidence_interval_mean(x)
-        mode_series = x.mode()
-        mode_value = mode_series.iloc[0] if not mode_series.empty else np.nan
-
-        stats_table = pd.DataFrame(
-            {
-                "Statistic": [
-                    "Count", "Minimum", "Maximum", "25th Percentile", "Median",
-                    "75th Percentile", "Mean", "Mode", "Range", "Standard Deviation",
-                    "Skewness", "Kurtosis", "95% CI — Lower", "95% CI — Upper"
-                ],
-                "Value": [
-                    len(x), x.min(), x.max(), x.quantile(.25), x.median(), x.quantile(.75),
-                    x.mean(), mode_value, x.max() - x.min(), x.std(),
-                    stats.skew(x, bias=False) if len(x) > 2 else np.nan,
-                    stats.kurtosis(x, bias=False) if len(x) > 3 else np.nan,
-                    ci_lo, ci_hi
-                ]
-            }
+        st.error(
+            f"Could not find {DEFAULT_FILE}. Upload the cleaned dataset using the sidebar."
         )
-        st.dataframe(stats_table, use_container_width=True, hide_index=True)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            fig, ax = plt.subplots(figsize=(8, 4.5))
-            sns.histplot(x, kde=True, ax=ax)
-            ax.set_title(f"Histogram — {selected}")
-            st.pyplot(fig, clear_figure=True, use_container_width=True)
-        with col2:
-            fig, ax = plt.subplots(figsize=(8, 4.5))
-            sns.boxplot(x=x, ax=ax)
-            ax.set_title(f"Box-Whisker Plot — {selected}")
-            st.pyplot(fig, clear_figure=True, use_container_width=True)
-
-        if len(num_cols) >= 2:
-            st.markdown("### Pairwise Scatter Plot")
-            xcol, ycol = st.columns(2)
-            x_var = xcol.selectbox("X variable", num_cols, index=0)
-            y_var = ycol.selectbox("Y variable", num_cols, index=min(1, len(num_cols)-1))
-            plot_df = sample_df[[x_var, y_var]].dropna()
-            fig, ax = plt.subplots(figsize=(10, 5))
-            sns.scatterplot(data=plot_df, x=x_var, y=y_var, ax=ax)
-            ax.set_title(f"{y_var} vs {x_var}")
-            st.pyplot(fig, clear_figure=True, use_container_width=True)
+        st.stop()
+except Exception as exc:
+    st.error(f"Unable to load the dataset: {exc}")
+    st.stop()
 
 # -----------------------------------------------------------------------------
-# PAGE 4: CATEGORICAL ANALYTICS
+# SIDEBAR FILTERS
 # -----------------------------------------------------------------------------
-elif page == "📊 Categorical Analytics":
-    st.subheader("Categorical Data Analysis")
+min_date = df["OrderDate"].min().date()
+max_date = df["OrderDate"].max().date()
 
-    if not cat_cols:
-        st.warning("No categorical variables were detected.")
-    else:
-        cat = st.selectbox("Select categorical variable", cat_cols)
-        counts = sample_df[cat].fillna("Missing").astype(str).value_counts()
-        rel = counts / counts.sum()
-        summary = pd.DataFrame({
-            "Category": counts.index,
-            "Frequency": counts.values,
-            "Relative Frequency": rel.values,
-            "Relative Frequency %": rel.values * 100,
-        })
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Categories", f"{len(counts):,}")
-        c2.metric("Highest Frequency", str(counts.index[0]))
-        c3.metric("Lowest Frequency", str(counts.index[-1]))
-
-        st.dataframe(summary, use_container_width=True, hide_index=True)
-
-        top_n = st.slider("Number of categories to display", 3, min(25, len(counts)), min(10, len(counts)))
-        chart_df = summary.head(top_n).sort_values("Frequency")
-
-        fig, ax = plt.subplots(figsize=(10, 5))
-        sns.barplot(data=chart_df, x="Frequency", y="Category", ax=ax)
-        ax.set_title(f"Top {top_n} Categories by Frequency — {cat}")
-        st.pyplot(fig, clear_figure=True, use_container_width=True)
-
-        if len(counts) <= 10:
-            fig, ax = plt.subplots(figsize=(7, 7))
-            ax.pie(counts.values, labels=counts.index, autopct="%1.1f%%", startangle=90)
-            ax.set_title(f"Relative Frequency — {cat}")
-            st.pyplot(fig, clear_figure=True, use_container_width=True)
-        else:
-            st.caption("Pie chart is hidden when there are more than 10 categories to preserve readability.")
-
-# -----------------------------------------------------------------------------
-# PAGE 5: CORRELATION & VISUALS
-# -----------------------------------------------------------------------------
-elif page == "🔗 Correlation & Visuals":
-    st.subheader("Correlation, Heat Map & Multivariate Visualisation")
-
-    if len(num_cols) < 2:
-        st.warning("At least two numeric variables are required for correlation analysis.")
-    else:
-        method = st.radio("Correlation method", ["Pearson", "Spearman"], horizontal=True)
-        corr = sample_df[num_cols].corr(method=method.lower())
-        st.dataframe(corr.round(4), use_container_width=True)
-
-        fig, ax = plt.subplots(figsize=(11, 7))
-        sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", center=0, ax=ax)
-        ax.set_title(f"{method} Correlation Heat Map")
-        st.pyplot(fig, clear_figure=True, use_container_width=True)
-
-        if len(num_cols) <= 8:
-            st.markdown("### Pair Plot")
-            pair_df = sample_df[num_cols].dropna()
-            # Limit rows for responsiveness while retaining a reproducible subset.
-            if len(pair_df) > 1000:
-                pair_df = pair_df.sample(1000, random_state=RANDOM_SEED)
-            g = sns.pairplot(pair_df)
-            st.pyplot(g.figure, clear_figure=True, use_container_width=True)
-        else:
-            st.info("Pair plot is suppressed because there are more than 8 numeric variables. Use the heat map instead.")
-
-# -----------------------------------------------------------------------------
-# PAGE 6: INFERENTIAL STATISTICS
-# -----------------------------------------------------------------------------
-elif page == "🧪 Inferential Statistics":
-    st.subheader("Inferential Statistics")
-    st.caption("Select a test appropriate to the structure of the data and the business question.")
-
-    test = st.selectbox(
-        "Select statistical procedure",
-        [
-            "Mean — 95% Confidence Interval",
-            "Independent Samples t-test",
-            "One-way ANOVA",
-            "Levene Test for Equality of Variances",
-            "Pearson Correlation Significance Test",
-            "Spearman Correlation Significance Test",
-            "Normality — Shapiro-Wilk",
-            "Normality — Jarque-Bera",
-            "Chi-square Test of Independence",
-            "Mann-Whitney U",
-            "Kruskal-Wallis",
-        ],
+with st.sidebar:
+    date_range = st.date_input(
+        "Order date range",
+        value=(min_date, max_date),
+        min_value=min_date,
+        max_value=max_date,
     )
 
-    alpha = st.number_input("Significance level (α)", min_value=0.001, max_value=0.20, value=0.05, step=0.01)
+    cities = st.multiselect("City", sorted(df["City"].dropna().unique()), default=[])
+    categories = st.multiselect("Category", sorted(df["Category"].dropna().unique()), default=[])
+    statuses = st.multiselect("Order status", sorted(df["OrderStatus"].dropna().unique()), default=[])
+    genders = st.multiselect("Gender", sorted(df["Gender"].dropna().unique()), default=[])
+    payments = st.multiselect(
+        "Payment method",
+        sorted(df["PaymentMethod"].dropna().unique()),
+        default=[],
+    )
+    products = st.multiselect(
+        "Product",
+        sorted(df["Product"].dropna().unique()),
+        default=[],
+    )
 
-    if test == "Mean — 95% Confidence Interval":
-        var = st.selectbox("Numerical variable", num_cols)
-        x = safe_numeric(sample_df, var)
-        mean, lo, hi = confidence_interval_mean(x, confidence=1-alpha)
-        st.metric("Sample Mean", format_number(mean))
-        st.write(f"{(1-alpha)*100:.1f}% confidence interval: **[{lo:.4f}, {hi:.4f}]**")
-        st.write("Interpretation: the interval estimates the population mean under the usual random-sampling assumptions.")
+    st.divider()
+    st.caption(f"Source: {source_label}")
+    st.caption(f"Loaded records: {len(df):,}")
+    st.caption(f"Loaded variables: {df.shape[1]:,}")
 
-    elif test in ["Independent Samples t-test", "Mann-Whitney U"]:
-        if len(num_cols) == 0 or len(cat_cols) == 0:
-            st.warning("This test requires at least one numeric and one categorical variable.")
-        else:
-            var = st.selectbox("Numerical outcome", num_cols)
-            group = st.selectbox("Two-group categorical variable", cat_cols)
-            work = sample_df[[var, group]].dropna()
-            levels = work[group].value_counts().index.tolist()
-            if len(levels) != 2:
-                st.warning(f"Selected variable '{group}' has {len(levels)} observed groups. Select a categorical variable with exactly two groups.")
-            else:
-                g1, g2 = levels[0], levels[1]
-                a = pd.to_numeric(work.loc[work[group] == g1, var], errors="coerce").dropna()
-                b = pd.to_numeric(work.loc[work[group] == g2, var], errors="coerce").dropna()
-                if test == "Independent Samples t-test":
-                    result = stats.ttest_ind(a, b, equal_var=False, nan_policy="omit")
-                else:
-                    result = stats.mannwhitneyu(a, b, alternative="two-sided")
-                st.write(f"**Group 1:** {g1} (n={len(a):,})")
-                st.write(f"**Group 2:** {g2} (n={len(b):,})")
-                st.metric("Test statistic", f"{result.statistic:.4f}")
-                st.metric("p-value", p_value_text(result.pvalue))
-                st.write(significance_text(result.pvalue, alpha))
+filters = {
+    "date_range": date_range,
+    "cities": cities,
+    "categories": categories,
+    "statuses": statuses,
+    "genders": genders,
+    "payments": payments,
+    "products": products,
+}
 
-    elif test == "One-way ANOVA":
-        if not num_cols or not cat_cols:
-            st.warning("ANOVA requires numeric and categorical variables.")
-        else:
-            var = st.selectbox("Numerical outcome", num_cols)
-            group = st.selectbox("Grouping variable", cat_cols)
-            work = sample_df[[var, group]].dropna()
-            groups = [pd.to_numeric(g[var], errors="coerce").dropna() for _, g in work.groupby(group)]
-            groups = [g for g in groups if len(g) > 1]
-            if len(groups) < 2:
-                st.warning("At least two groups with sufficient observations are required.")
-            else:
-                result = stats.f_oneway(*groups)
-                st.metric("F-statistic", f"{result.statistic:.4f}")
-                st.metric("p-value", p_value_text(result.pvalue))
-                st.write(significance_text(result.pvalue, alpha))
+fdf = get_filtered_data(df, filters)
 
-    elif test == "Levene Test for Equality of Variances":
-        if not num_cols or not cat_cols:
-            st.warning("Levene's test requires numeric and categorical variables.")
-        else:
-            var = st.selectbox("Numerical variable", num_cols)
-            group = st.selectbox("Grouping variable", cat_cols)
-            work = sample_df[[var, group]].dropna()
-            groups = [pd.to_numeric(g[var], errors="coerce").dropna() for _, g in work.groupby(group)]
-            groups = [g for g in groups if len(g) > 1]
-            if len(groups) < 2:
-                st.warning("At least two groups are required.")
-            else:
-                result = stats.levene(*groups, center="median")
-                st.metric("Levene statistic", f"{result.statistic:.4f}")
-                st.metric("p-value", p_value_text(result.pvalue))
-                st.write(significance_text(result.pvalue, alpha))
+# -----------------------------------------------------------------------------
+# DATA QUALITY BANNER
+# -----------------------------------------------------------------------------
+with st.expander("🔎 Data Quality & Project Compliance", expanded=False):
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Records loaded", f"{len(df):,}", f"vs expected {EXPECTED_SAMPLE_SIZE:,}")
+    c2.metric("Duplicate rows", f"{df.duplicated().sum():,}")
+    c3.metric("InvalidRow flags", f"{int(df['InvalidRow'].sum()):,}")
+    c4.metric("Amount mismatch flags", f"{int(df['AmountMismatch'].sum()):,}")
 
-    elif test in ["Pearson Correlation Significance Test", "Spearman Correlation Significance Test"]:
-        if len(num_cols) < 2:
-            st.warning("At least two numeric variables are required.")
-        else:
-            xcol = st.selectbox("X variable", num_cols, index=0)
-            ycol = st.selectbox("Y variable", num_cols, index=min(1, len(num_cols)-1))
-            work = sample_df[[xcol, ycol]].dropna()
-            if test.startswith("Pearson"):
-                result = stats.pearsonr(work[xcol], work[ycol])
-            else:
-                result = stats.spearmanr(work[xcol], work[ycol])
-            st.metric("Correlation", f"{result.statistic:.4f}")
-            st.metric("p-value", p_value_text(result.pvalue))
-            st.write(significance_text(result.pvalue, alpha))
+    missing = df.isna().sum().sort_values(ascending=False)
+    missing = missing[missing > 0]
+    if len(missing):
+        st.write("**Missing values by variable:**")
+        st.dataframe(
+            pd.DataFrame({
+                "Missing Count": missing,
+                "Missing %": (missing / len(df) * 100).round(2),
+            }),
+            use_container_width=True,
+        )
+    else:
+        st.success("No missing values detected.")
 
-    elif test.startswith("Normality"):
-        if not num_cols:
-            st.warning("No numeric variables detected.")
-        else:
-            var = st.selectbox("Numerical variable", num_cols)
-            x = safe_numeric(sample_df, var)
-            # Shapiro is generally intended for smaller samples; use a reproducible subset if needed.
-            if test.endswith("Shapiro-Wilk"):
-                test_x = x if len(x) <= 5000 else x.sample(5000, random_state=RANDOM_SEED)
-                result = stats.shapiro(test_x)
-            else:
-                result = stats.jarque_bera(x)
-            st.metric("Test statistic", f"{result.statistic:.4f}")
-            st.metric("p-value", p_value_text(result.pvalue))
-            st.write(significance_text(result.pvalue, alpha))
+    mismatch_rate = df["CalculatedMismatchCheck"].mean() * 100
+    st.write(
+        f"Independent amount validation: **{int(df['CalculatedMismatchCheck'].sum()):,}** records "
+        f"fail the recalculated TotalAmount check ({mismatch_rate:.2f}%)."
+    )
+    st.info(
+        "The uploaded cleaned file contains 2,401 records, whereas the project brief specifies a "
+        "2,500-record random sample. The dashboard deliberately reports the actual loaded data "
+        "rather than silently inventing or duplicating records. Verify the sampling/cleaning notebook "
+        "before final submission if the official deliverable must contain exactly 2,500 rows."
+    )
 
-    elif test == "Chi-square Test of Independence":
-        if len(cat_cols) < 2:
-            st.warning("At least two categorical variables are required.")
-        else:
-            c1 = st.selectbox("Categorical variable 1", cat_cols, index=0)
-            c2 = st.selectbox("Categorical variable 2", cat_cols, index=min(1, len(cat_cols)-1))
-            contingency = pd.crosstab(sample_df[c1].fillna("Missing"), sample_df[c2].fillna("Missing"))
-            chi2, p, dof, expected = stats.chi2_contingency(contingency)
+# -----------------------------------------------------------------------------
+# KPI CALCULATIONS
+# -----------------------------------------------------------------------------
+orders = len(fdf)
+revenue = fdf["Revenue"].sum()
+order_value = fdf["TotalAmount"].mean() if orders else np.nan
+avg_rating = fdf["Rating"].mean() if fdf["Rating"].notna().any() else np.nan
+total_units = fdf["Quantity"].sum()
+delivered = int(fdf["OrderStatus"].eq("Delivered").sum())
+cancelled = int(fdf["OrderStatus"].eq("Cancelled").sum())
+pending = int(fdf["OrderStatus"].eq("Pending").sum())
+delivery_rate = safe_div(delivered, orders) * 100 if orders else np.nan
+cancellation_rate = safe_div(cancelled, orders) * 100 if orders else np.nan
+rated_orders = int(fdf["Rating"].notna().sum())
+
+# -----------------------------------------------------------------------------
+# EXECUTIVE OVERVIEW
+# -----------------------------------------------------------------------------
+st.header("1. Executive Overview")
+
+k1, k2, k3, k4, k5, k6 = st.columns(6)
+k1.metric("Orders", f"{orders:,}")
+k2.metric("Revenue", money(revenue))
+k3.metric("Avg. Order Value", money(order_value))
+k4.metric("Units Sold", f"{total_units:,}")
+k5.metric("Avg. Rating", f"{avg_rating:.2f}" if pd.notna(avg_rating) else "N/A")
+k6.metric("Cancellation Rate", pct(cancellation_rate))
+
+k7, k8, k9 = st.columns(3)
+k7.metric("Delivery Rate", pct(delivery_rate))
+k8.metric("Pending Orders", f"{pending:,}")
+k9.metric("Rated Orders", f"{rated_orders:,}")
+
+st.caption(
+    "All KPIs respond to the sidebar filters. Revenue is the supplied Revenue field; "
+    "TotalAmount represents order value after discount."
+)
+
+# -----------------------------------------------------------------------------
+# SALES & REVENUE
+# -----------------------------------------------------------------------------
+st.header("2. Sales & Revenue Analytics")
+
+left, right = st.columns(2)
+
+with left:
+    st.subheader("Revenue Trend")
+    monthly = (
+        fdf.dropna(subset=["OrderDate"])
+        .assign(Month=lambda x: x["OrderDate"].dt.to_period("M").astype(str))
+        .groupby("Month", as_index=False)
+        .agg(Revenue=("Revenue", "sum"), Orders=("OrderID", "count"))
+    )
+    if len(monthly):
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        sns.lineplot(data=monthly, x="Month", y="Revenue", marker="o", ax=ax)
+        ax.set_xlabel("Month")
+        ax.set_ylabel("Revenue (₹)")
+        ax.tick_params(axis="x", rotation=45)
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=True)
+    else:
+        st.pyplot(plot_empty("No data for the selected filters."), clear_figure=True)
+
+with right:
+    st.subheader("Revenue by Category")
+    cat_rev = (
+        fdf.groupby("Category", as_index=False)
+        .agg(Revenue=("Revenue", "sum"), Orders=("OrderID", "count"))
+        .sort_values("Revenue", ascending=False)
+    )
+    if len(cat_rev):
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        sns.barplot(data=cat_rev, x="Revenue", y="Category", ax=ax)
+        ax.set_xlabel("Revenue (₹)")
+        ax.set_ylabel("")
+        fig.tight_layout()
+        st.pyplot(fig, clear_figure=True)
+    else:
+        st.pyplot(plot_empty("No data for the selected filters."), clear_figure=True)
+
+left, right = st.columns(2)
+with left:
+    st.subheader("Revenue by City")
+    city_rev = (
+        fdf.groupby("City", as_index=False)
+        .agg(Revenue=("Revenue", "sum"), Orders=("OrderID", "count"))
+        .sort_values("Revenue", ascending=False)
+    )
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    if len(city_rev):
+        sns.barplot(data=city_rev, x="Revenue", y="City", ax=ax)
+        ax.set_xlabel("Revenue (₹)")
+        ax.set_ylabel("")
+    else:
+        ax.text(.5, .5, "No data", ha="center", va="center")
+        ax.axis("off")
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+with right:
+    st.subheader("Top Products by Revenue")
+    prod_rev = (
+        fdf.groupby("Product", as_index=False)
+        .agg(Revenue=("Revenue", "sum"), Units=("Quantity", "sum"))
+        .sort_values("Revenue", ascending=False)
+        .head(10)
+    )
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    if len(prod_rev):
+        sns.barplot(data=prod_rev, x="Revenue", y="Product", ax=ax)
+        ax.set_xlabel("Revenue (₹)")
+        ax.set_ylabel("")
+    else:
+        ax.text(.5, .5, "No data", ha="center", va="center")
+        ax.axis("off")
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+# -----------------------------------------------------------------------------
+# CUSTOMER & PRODUCT ANALYSIS
+# -----------------------------------------------------------------------------
+st.header("3. Customer & Product Analytics")
+
+c1, c2 = st.columns(2)
+with c1:
+    st.subheader("Customer Age Distribution")
+    age = fdf["CustomerAge"].dropna()
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    if len(age):
+        sns.histplot(age, bins=12, kde=True, ax=ax)
+        ax.set_xlabel("Customer Age")
+        ax.set_ylabel("Customers / Orders")
+    else:
+        ax.text(.5, .5, "No age data", ha="center", va="center")
+        ax.axis("off")
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+with c2:
+    st.subheader("Rating Distribution")
+    rating = fdf["Rating"].dropna()
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    if len(rating):
+        sns.countplot(x=rating.astype(int), ax=ax)
+        ax.set_xlabel("Rating")
+        ax.set_ylabel("Frequency")
+    else:
+        ax.text(.5, .5, "No rating data", ha="center", va="center")
+        ax.axis("off")
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+c1, c2 = st.columns(2)
+with c1:
+    st.subheader("Revenue vs Unit Price")
+    plot_df = fdf[["UnitPrice", "Revenue", "Quantity", "Category"]].dropna()
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    if len(plot_df):
+        sns.scatterplot(data=plot_df, x="UnitPrice", y="Revenue", size="Quantity", alpha=.55, ax=ax)
+        ax.set_xlabel("Unit Price (₹)")
+        ax.set_ylabel("Revenue (₹)")
+    else:
+        ax.text(.5, .5, "No data", ha="center", va="center")
+        ax.axis("off")
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+with c2:
+    st.subheader("Order Value Distribution")
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    if len(fdf):
+        sns.boxplot(y=fdf["TotalAmount"], ax=ax)
+        ax.set_ylabel("Total Order Amount (₹)")
+    else:
+        ax.text(.5, .5, "No data", ha="center", va="center")
+        ax.axis("off")
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+# -----------------------------------------------------------------------------
+# ORDER / OPERATIONS
+# -----------------------------------------------------------------------------
+st.header("4. Order & Operational Analytics")
+
+c1, c2 = st.columns(2)
+with c1:
+    status_counts = fdf["OrderStatus"].value_counts().rename_axis("OrderStatus").reset_index(name="Count")
+    st.subheader("Order Status")
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    if len(status_counts):
+        sns.barplot(data=status_counts, x="OrderStatus", y="Count", ax=ax)
+        ax.set_xlabel("")
+        ax.set_ylabel("Orders")
+    else:
+        ax.text(.5, .5, "No data", ha="center", va="center")
+        ax.axis("off")
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+with c2:
+    st.subheader("Delivery Time Distribution")
+    delivery = fdf.loc[fdf["DeliveryDays"].notna() & (fdf["DeliveryDays"] >= 0), "DeliveryDays"]
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    if len(delivery):
+        sns.histplot(delivery, bins=min(15, max(5, delivery.nunique())), kde=True, ax=ax)
+        ax.set_xlabel("Delivery Time (days)")
+        ax.set_ylabel("Orders")
+    else:
+        ax.text(.5, .5, "No completed delivery dates", ha="center", va="center")
+        ax.axis("off")
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+# -----------------------------------------------------------------------------
+# CORRELATION / DESCRIPTIVE STATISTICS
+# -----------------------------------------------------------------------------
+st.header("5. Statistical Analysis")
+
+with st.expander("Descriptive statistics — non-categorical variables", expanded=False):
+    summary = make_summary_table(fdf)
+    st.dataframe(summary.round(4), use_container_width=True)
+
+with st.expander("Categorical frequency & relative frequency", expanded=False):
+    chosen_cat = st.selectbox("Choose categorical variable", CATEGORICAL_COLUMNS, key="cat_summary")
+    st.dataframe(category_summary(fdf, chosen_cat), use_container_width=True)
+
+with st.expander("Correlation analysis — Pearson & Spearman", expanded=False):
+    corr_cols = [c for c in NUMERIC_COLUMNS if c in fdf.columns]
+    corr = fdf[corr_cols].corr(method="pearson")
+    spear = fdf[corr_cols].corr(method="spearman")
+
+    st.write("**Pearson correlation**")
+    fig, ax = plt.subplots(figsize=(10, 7))
+    sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", center=0, ax=ax)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+    st.write("**Spearman correlation**")
+    fig, ax = plt.subplots(figsize=(10, 7))
+    sns.heatmap(spear, annot=True, fmt=".2f", cmap="coolwarm", center=0, ax=ax)
+    fig.tight_layout()
+    st.pyplot(fig, clear_figure=True)
+
+# -----------------------------------------------------------------------------
+# INFERENTIAL ANALYSIS
+# -----------------------------------------------------------------------------
+st.header("6. Inferential Analysis")
+
+# 95% CI for mean TotalAmount
+ci_low, ci_high = confidence_interval_mean(fdf["TotalAmount"], 0.95)
+
+ic1, ic2, ic3 = st.columns(3)
+ic1.metric("Mean Order Value", money(fdf["TotalAmount"].mean()))
+ic2.metric("95% CI — Lower", money(ci_low))
+ic3.metric("95% CI — Upper", money(ci_high))
+
+# Statistical test selection
+with st.expander("A. Mean comparison — t-test / ANOVA", expanded=False):
+    st.write("**Two-group t-test by Gender**")
+    groups = [g["TotalAmount"].dropna() for _, g in fdf.groupby("Gender")]
+    group_names = [name for name, _ in fdf.groupby("Gender")]
+    if len(groups) == 2 and all(len(g) >= 2 for g in groups):
+        t_stat, t_p = stats.ttest_ind(groups[0], groups[1], equal_var=False, nan_policy="omit")
+        st.write(pd.DataFrame({
+            "Statistic": [t_stat],
+            "p-value": [t_p],
+            "Decision at α=0.05": ["Reject H0" if t_p < .05 else "Do not reject H0"],
+        }).round(5))
+        st.caption("H0: mean TotalAmount is equal across the two gender groups. Welch's t-test is used.")
+    else:
+        st.info("A two-group gender comparison could not be computed for the selected filters.")
+
+    st.write("**One-way ANOVA — TotalAmount across Categories**")
+    category_groups = [g["TotalAmount"].dropna() for _, g in fdf.groupby("Category")]
+    category_groups = [g for g in category_groups if len(g) >= 2]
+    if len(category_groups) >= 2:
+        f_stat, p_val = stats.f_oneway(*category_groups)
+        st.write(pd.DataFrame({
+            "F-statistic": [f_stat],
+            "p-value": [p_val],
+            "Decision at α=0.05": ["Reject H0" if p_val < .05 else "Do not reject H0"],
+        }).round(5))
+        st.caption("H0: all category means are equal.")
+    else:
+        st.info("At least two sufficiently populated categories are required for ANOVA.")
+
+with st.expander("B. Test of variance — Levene", expanded=False):
+    variance_groups = [g["TotalAmount"].dropna() for _, g in fdf.groupby("Category")]
+    variance_groups = [g for g in variance_groups if len(g) >= 2]
+    if len(variance_groups) >= 2:
+        lev_stat, lev_p = stats.levene(*variance_groups, center="median")
+        st.write(pd.DataFrame({
+            "Levene statistic": [lev_stat],
+            "p-value": [lev_p],
+            "Decision at α=0.05": ["Reject H0" if lev_p < .05 else "Do not reject H0"],
+        }).round(5))
+        st.caption("H0: category groups have equal variance.")
+    else:
+        st.info("Insufficient groups for Levene's test.")
+
+with st.expander("C. Normality — Shapiro-Wilk", expanded=False):
+    x = fdf["TotalAmount"].dropna()
+    # Shapiro-Wilk is most appropriate here because the filtered sample is well below 5,000.
+    if 3 <= len(x) <= 5000:
+        sh_stat, sh_p = stats.shapiro(x)
+        st.write(pd.DataFrame({
+            "Shapiro-Wilk statistic": [sh_stat],
+            "p-value": [sh_p],
+            "Decision at α=0.05": ["Reject H0 (not normal)" if sh_p < .05 else "Do not reject H0"],
+        }).round(5))
+        st.caption("H0: TotalAmount follows a normal distribution. Statistical significance does not by itself establish practical importance.")
+    else:
+        st.info("Shapiro-Wilk requires 3–5,000 observations for this implementation.")
+
+with st.expander("D. Chi-square test of independence", expanded=False):
+    chi_col1, chi_col2 = st.columns(2)
+    with chi_col1:
+        chi_a = st.selectbox("Variable A", CATEGORICAL_COLUMNS, index=1, key="chi_a")
+    with chi_col2:
+        chi_b = st.selectbox("Variable B", CATEGORICAL_COLUMNS, index=5, key="chi_b")
+
+    if chi_a != chi_b:
+        contingency = pd.crosstab(fdf[chi_a].fillna("Missing"), fdf[chi_b].fillna("Missing"))
+        if contingency.shape[0] >= 2 and contingency.shape[1] >= 2:
+            chi_stat, chi_p, dof, expected = stats.chi2_contingency(contingency)
+            st.write(pd.DataFrame({
+                "Chi-square": [chi_stat],
+                "Degrees of freedom": [dof],
+                "p-value": [chi_p],
+                "Decision at α=0.05": ["Reject H0" if chi_p < .05 else "Do not reject H0"],
+            }).round(5))
+            st.caption(f"H0: {chi_a} and {chi_b} are independent.")
             st.dataframe(contingency, use_container_width=True)
-            st.metric("Chi-square statistic", f"{chi2:.4f}")
-            st.metric("Degrees of freedom", f"{dof}")
-            st.metric("p-value", p_value_text(p))
-            st.write(significance_text(p, alpha))
-
-    elif test == "Kruskal-Wallis":
-        if not num_cols or not cat_cols:
-            st.warning("Kruskal-Wallis requires numeric and categorical variables.")
         else:
-            var = st.selectbox("Numerical outcome", num_cols)
-            group = st.selectbox("Grouping variable", cat_cols)
-            work = sample_df[[var, group]].dropna()
-            groups = [pd.to_numeric(g[var], errors="coerce").dropna() for _, g in work.groupby(group)]
-            groups = [g for g in groups if len(g) > 1]
-            if len(groups) < 2:
-                st.warning("At least two groups are required.")
-            else:
-                result = stats.kruskal(*groups)
-                st.metric("H-statistic", f"{result.statistic:.4f}")
-                st.metric("p-value", p_value_text(result.pvalue))
-                st.write(significance_text(result.pvalue, alpha))
-
-# -----------------------------------------------------------------------------
-# PAGE 7: REGRESSION
-# -----------------------------------------------------------------------------
-elif page == "📐 Regression Analysis":
-    st.subheader("Regression Analysis")
-    st.write(
-        "This section provides an OLS regression for a continuous outcome and a logistic regression option for a binary outcome. "
-        "Categorical predictors are converted to dummy variables."
-    )
-
-    regression_type = st.radio("Model type", ["OLS — Continuous Outcome", "Logistic — Binary Outcome"], horizontal=True)
-
-    if regression_type == "OLS — Continuous Outcome":
-        if len(num_cols) < 2:
-            st.warning("At least two numeric variables are needed for OLS regression.")
-        else:
-            default_target = sales_col if sales_col in num_cols else num_cols[0]
-            target = st.selectbox("Dependent variable (Y)", num_cols, index=num_cols.index(default_target))
-            candidate_predictors = [c for c in sample_df.columns if c != target and (c in num_cols or c in cat_cols)]
-            predictors = st.multiselect(
-                "Independent variables (X)",
-                candidate_predictors,
-                default=[c for c in [quantity_col, discount_col, profit_col] if c and c in candidate_predictors][:3],
-            )
-
-            if not predictors:
-                st.info("Select at least one predictor.")
-            else:
-                model_df = sample_df[[target] + predictors].copy().dropna()
-                y = pd.to_numeric(model_df[target], errors="coerce")
-                X_raw = model_df[predictors].copy()
-                X = pd.get_dummies(X_raw, drop_first=True, dtype=float)
-                X = X.apply(pd.to_numeric, errors="coerce")
-                valid = y.notna() & X.notna().all(axis=1)
-                y = y.loc[valid]
-                X = X.loc[valid]
-                if len(y) < max(30, len(X.columns) + 10):
-                    st.warning("Insufficient complete observations for a stable regression model.")
-                else:
-                    X = sm.add_constant(X, has_constant="add")
-                    try:
-                        model = sm.OLS(y, X).fit()
-                        c1, c2, c3, c4 = st.columns(4)
-                        c1.metric("Observations", f"{int(model.nobs):,}")
-                        c2.metric("R²", f"{model.rsquared:.4f}")
-                        c3.metric("Adjusted R²", f"{model.rsquared_adj:.4f}")
-                        c4.metric("F-test p-value", p_value_text(model.f_pvalue))
-
-                        coef = pd.DataFrame({
-                            "Coefficient": model.params,
-                            "Std. Error": model.bse,
-                            "t-statistic": model.tvalues,
-                            "p-value": model.pvalues,
-                            "CI Lower": model.conf_int()[0],
-                            "CI Upper": model.conf_int()[1],
-                        })
-                        st.dataframe(coef.round(6), use_container_width=True)
-
-                        with st.expander("Full Statsmodels Regression Summary"):
-                            st.text(model.summary().as_text())
-
-                        fig, ax = plt.subplots(figsize=(9, 5))
-                        sns.scatterplot(x=model.fittedvalues, y=model.resid, ax=ax)
-                        ax.axhline(0, linestyle="--")
-                        ax.set_xlabel("Fitted values")
-                        ax.set_ylabel("Residuals")
-                        ax.set_title("OLS Residual Plot")
-                        st.pyplot(fig, clear_figure=True, use_container_width=True)
-                    except Exception as exc:
-                        st.error(f"Regression could not be estimated with the selected variables: {exc}")
-
+            st.info("Both categorical variables need at least two observed categories.")
     else:
-        # Logistic regression: require a binary target. We allow categorical or numeric binary targets.
-        all_binary_candidates = []
-        for c in sample_df.columns:
-            non_null = sample_df[c].dropna()
-            if len(non_null.unique()) == 2:
-                all_binary_candidates.append(c)
+        st.warning("Choose two different categorical variables.")
 
-        if not all_binary_candidates:
-            st.warning("No binary outcome variable was detected in the sample.")
-        else:
-            target = st.selectbox("Binary dependent variable (Y)", all_binary_candidates)
-            candidate_predictors = [c for c in sample_df.columns if c != target and (c in num_cols or c in cat_cols)]
-            predictors = st.multiselect("Independent variables (X)", candidate_predictors, default=candidate_predictors[:3])
-
-            if not predictors:
-                st.info("Select at least one predictor.")
-            else:
-                model_df = sample_df[[target] + predictors].dropna().copy()
-                y_raw = model_df[target]
-                levels = list(pd.unique(y_raw))
-                if len(levels) != 2:
-                    st.warning("The selected target is no longer binary after removing missing values.")
-                else:
-                    # Map the first observed level to 0 and the second to 1; labels are shown to the user.
-                    y = y_raw.map({levels[0]: 0, levels[1]: 1}).astype(float)
-                    X = pd.get_dummies(model_df[predictors], drop_first=True, dtype=float)
-                    X = X.apply(pd.to_numeric, errors="coerce")
-                    X = sm.add_constant(X, has_constant="add")
-                    valid = y.notna() & X.notna().all(axis=1)
-                    y, X = y.loc[valid], X.loc[valid]
-                    if y.nunique() < 2:
-                        st.warning("The target has only one class in the usable observations.")
-                    else:
-                        try:
-                            model = sm.Logit(y, X).fit(disp=False)
-                            c1, c2, c3 = st.columns(3)
-                            c1.metric("Observations", f"{int(model.nobs):,}")
-                            c2.metric("McFadden-style pseudo R²", f"{model.prsquared:.4f}")
-                            c3.metric("LR-test p-value", p_value_text(model.llr_pvalue))
-
-                            coef = pd.DataFrame({
-                                "Coefficient": model.params,
-                                "Odds Ratio": np.exp(model.params),
-                                "Std. Error": model.bse,
-                                "z-statistic": model.tvalues,
-                                "p-value": model.pvalues,
-                            })
-                            st.dataframe(coef.round(6), use_container_width=True)
-                            st.caption(f"Outcome coding: 0 = {levels[0]!r}; 1 = {levels[1]!r}")
-                            with st.expander("Full Statsmodels Logistic Regression Summary"):
-                                st.text(model.summary().as_text())
-                        except Exception as exc:
-                            st.error(f"Logistic regression could not be estimated: {exc}")
+with st.expander("E. Non-parametric robustness check — Kruskal-Wallis", expanded=False):
+    kw_groups = [g["TotalAmount"].dropna() for _, g in fdf.groupby("Category")]
+    kw_groups = [g for g in kw_groups if len(g) >= 2]
+    if len(kw_groups) >= 2:
+        kw_stat, kw_p = stats.kruskal(*kw_groups)
+        st.write(pd.DataFrame({
+            "Kruskal-Wallis statistic": [kw_stat],
+            "p-value": [kw_p],
+            "Decision at α=0.05": ["Reject H0" if kw_p < .05 else "Do not reject H0"],
+        }).round(5))
+        st.caption("H0: the category groups have the same distribution of TotalAmount.")
+    else:
+        st.info("Insufficient groups for Kruskal-Wallis.")
 
 # -----------------------------------------------------------------------------
-# PAGE 8: SAMPLE DATA
+# REGRESSION / MODELING
 # -----------------------------------------------------------------------------
-elif page == "📥 Sample Data":
-    st.subheader("Reproducible Analytical Sample")
-    st.write(
-        f"The dashboard uses exactly {SAMPLE_SIZE:,} records selected from the uploaded dataset with "
-        f"`random_state = {RANDOM_SEED}`. This is fixed for reproducibility."
-    )
-    st.dataframe(sample_df.head(100), use_container_width=True, height=600)
+st.header("7. Regression & Predictive Analysis")
+st.info(
+    "Regression coefficients are associations, not proof of causality. In particular, "
+    "Revenue/TotalAmount is mechanically related to Quantity, UnitPrice and DiscountRate, "
+    "so those variables should not be interpreted as independent causal drivers."
+)
 
+reg_df = fdf[[
+    "Revenue", "Quantity", "UnitPrice", "DiscountRate", "CustomerAge", "Gender", "Category", "City"
+]].dropna().copy()
+
+if len(reg_df) >= 30:
+    try:
+        model = smf.ols(
+            "Revenue ~ Quantity + UnitPrice + DiscountRate + CustomerAge + C(Gender) + C(Category) + C(City)",
+            data=reg_df,
+        ).fit()
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Observations", f"{int(model.nobs):,}")
+        m2.metric("R²", f"{model.rsquared:.3f}")
+        m3.metric("Adjusted R²", f"{model.rsquared_adj:.3f}")
+
+        coef = pd.DataFrame({
+            "Coefficient": model.params,
+            "Std. Error": model.bse,
+            "t-statistic": model.tvalues,
+            "p-value": model.pvalues,
+        })
+        coef["Significant at 5%"] = np.where(coef["p-value"] < .05, "Yes", "No")
+        st.dataframe(coef.round(5), use_container_width=True)
+
+        with st.expander("Full Statsmodels OLS summary", expanded=False):
+            st.text(model.summary().as_text())
+    except Exception as exc:
+        st.warning(f"OLS model could not be estimated for the current filters: {exc}")
+else:
+    st.info("At least 30 complete observations are recommended for the regression section.")
+
+# Logistic regression for cancellation
+with st.expander("Logistic regression — probability of cancellation", expanded=False):
+    log_df = fdf[[
+        "IsCancelled", "Quantity", "UnitPrice", "DiscountRate", "CustomerAge", "Gender", "Category", "City"
+    ]].dropna().copy()
+    log_df["IsCancelled"] = log_df["IsCancelled"].astype(int)
+
+    if len(log_df) >= 50 and log_df["IsCancelled"].nunique() == 2:
+        try:
+            log_model = smf.logit(
+                "IsCancelled ~ Quantity + UnitPrice + DiscountRate + CustomerAge + C(Gender) + C(Category) + C(City)",
+                data=log_df,
+            ).fit(disp=False)
+            odds = pd.DataFrame({
+                "Log-Odds Coefficient": log_model.params,
+                "Odds Ratio": np.exp(log_model.params),
+                "p-value": log_model.pvalues,
+            })
+            odds["Significant at 5%"] = np.where(odds["p-value"] < .05, "Yes", "No")
+            st.dataframe(odds.round(5), use_container_width=True)
+            st.caption(
+                "An odds ratio above 1 indicates higher modeled odds of cancellation for a one-unit increase in a numeric predictor, "
+                "holding other included variables constant; categorical coefficients are relative to their reference category."
+            )
+        except Exception as exc:
+            st.warning(f"Logistic regression could not be estimated: {exc}")
+    else:
+        st.info("Both cancellation outcomes and at least 50 usable observations are required.")
+
+# -----------------------------------------------------------------------------
+# MANAGERIAL INSIGHTS — DATA-DRIVEN, NOT HARDCODED
+# -----------------------------------------------------------------------------
+st.header("8. Automated Findings & Managerial Insight Prompts")
+
+insights = []
+if len(fdf):
+    top_city = fdf.groupby("City")["Revenue"].sum().idxmax()
+    top_cat = fdf.groupby("Category")["Revenue"].sum().idxmax()
+    top_product = fdf.groupby("Product")["Revenue"].sum().idxmax()
+    top_payment = fdf["PaymentMethod"].value_counts(dropna=True).idxmax()
+    insights.append(f"Revenue concentration: **{top_city}** is the highest-revenue city within the selected data.")
+    insights.append(f"Category performance: **{top_cat}** generates the highest revenue within the selected data.")
+    insights.append(f"Product performance: **{top_product}** is the highest-revenue product within the selected data.")
+    insights.append(f"Payment behaviour: **{top_payment}** is the most frequently observed non-missing payment method.")
+    if cancellation_rate is not np.nan and pd.notna(cancellation_rate):
+        insights.append(f"Order operations: the selected data has a **{cancellation_rate:.1f}% cancellation rate**.")
+
+for i, insight in enumerate(insights, start=1):
+    st.markdown(f"**{i}.** {insight}")
+
+st.warning(
+    "Managerial recommendations should be finalised after the team reviews the statistical evidence, "
+    "business context and limitations. The automated text above intentionally describes findings rather "
+    "than declaring a single strategic 'winner'."
+)
+
+# -----------------------------------------------------------------------------
+# DATA DICTIONARY / RAW DATA
+# -----------------------------------------------------------------------------
+st.header("9. Data Dictionary & Detailed Data")
+
+with st.expander("Data dictionary", expanded=False):
+    dictionary = pd.DataFrame([
+        ["OrderID", "Unique order identifier", "Integer", "Nominal / Index"],
+        ["CustomerID", "Customer identifier", "String", "Nominal"],
+        ["OrderDate", "Date and time of order", "DateTime", "Temporal"],
+        ["CustomerAge", "Customer age in years", "Decimal", "Ratio"],
+        ["Gender", "Customer gender", "String", "Nominal"],
+        ["City", "Customer/order city", "String", "Nominal"],
+        ["Category", "Product category", "String", "Nominal"],
+        ["Product", "Product name", "String", "Nominal"],
+        ["Quantity", "Units in the order", "Integer", "Ratio"],
+        ["UnitPrice", "Price per unit", "Integer", "Ratio"],
+        ["Discount", "Original discount representation", "String", "Nominal / source field"],
+        ["PaymentMethod", "Payment method", "String", "Nominal"],
+        ["OrderStatus", "Order status", "String", "Nominal"],
+        ["DeliveryDate", "Delivery date and time", "DateTime", "Temporal"],
+        ["Rating", "Customer rating", "Decimal", "Ordinal"],
+        ["TotalAmount", "Order value after discount", "Decimal", "Ratio"],
+        ["DiscountRate", "Discount converted to decimal rate", "Decimal", "Ratio"],
+        ["CalculatedAmount", "Supplied calculated order amount", "Decimal", "Ratio"],
+        ["AmountMismatch", "Supplied amount-validation flag", "Boolean", "Nominal"],
+        ["InvalidRow", "Supplied invalid-row flag", "Boolean", "Nominal"],
+        ["Revenue", "Revenue field supplied by the dataset", "Decimal", "Ratio"],
+        ["OrderMonth", "Month derived/supplied for order", "Date", "Temporal"],
+    ], columns=["Variable", "Definition", "Format", "Measurement Type"])
+    st.dataframe(dictionary, use_container_width=True)
+
+with st.expander("Filtered data preview", expanded=False):
+    st.dataframe(fdf, use_container_width=True, height=450)
+
+# -----------------------------------------------------------------------------
+# DOWNLOADS
+# -----------------------------------------------------------------------------
+st.header("10. Export")
+
+summary_csv = make_summary_table(fdf).to_csv(index=False).encode("utf-8")
+filtered_csv = fdf.to_csv(index=False).encode("utf-8")
+
+x1, x2 = st.columns(2)
+with x1:
     st.download_button(
-        "⬇️ Download the 2,500-record analytical sample",
-        data=make_download_csv(sample_df),
-        file_name="shopease_fbda_sample_2500.csv",
+        "⬇️ Download descriptive statistics CSV",
+        data=summary_csv,
+        file_name="fbda_descriptive_statistics.csv",
         mime="text/csv",
+        use_container_width=True,
+    )
+with x2:
+    st.download_button(
+        "⬇️ Download filtered analytical data CSV",
+        data=filtered_csv,
+        file_name="fbda_filtered_data.csv",
+        mime="text/csv",
+        use_container_width=True,
     )
 
 # -----------------------------------------------------------------------------
@@ -844,6 +889,6 @@ elif page == "📥 Sample Data":
 # -----------------------------------------------------------------------------
 st.divider()
 st.caption(
-    "FBDA Project • Dynamic Analytical Dashboard with Python • "
-    f"Group {GROUP_ID} • Fixed randomization seed {RANDOM_SEED} • Sample size {SAMPLE_SIZE:,}"
+    "FBDA Project | FORE School of Management | Dynamic Analytical Dashboard with Python | "
+    "Analytical results are sample-dependent and should be interpreted with the project's data and sampling limitations."
 )
